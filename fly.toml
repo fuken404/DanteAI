@@ -1,0 +1,13 @@
+app = "dante-ai-bot"
+primary_region = "iad"
+
+[build]
+
+[mounts]
+  source = "dante_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

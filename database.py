@@ -1,119 +1,104 @@
-import asyncpg
+import aiosqlite
 import os
-import ssl
 from typing import Optional
 
-_pool: Optional[asyncpg.Pool] = None
-
-
-async def get_pool() -> asyncpg.Pool:
-    global _pool
-    if _pool is None:
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-        _pool = await asyncpg.create_pool(
-            os.getenv("DATABASE_URL"),
-            min_size=1,
-            max_size=5,
-            ssl=ssl_ctx,
-        )
-    return _pool
+DB_PATH = os.getenv("DB_PATH", "/data/dante.db")
 
 
 async def init_db():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                role VARCHAR(20) NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        await conn.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS memories (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                key VARCHAR(255) NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
                 value TEXT NOT NULL,
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, key)
             )
         """)
-        await conn.execute("""
+        await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_conv_user_time
-            ON conversations(user_id, created_at DESC)
+            ON conversations(user_id, created_at)
         """)
+        await db.commit()
 
 
 async def save_message(user_id: int, role: str, content: str):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)",
-            user_id, role, content
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO conversations (user_id, role, content) VALUES (?, ?, ?)",
+            (user_id, role, content)
         )
+        await db.commit()
 
 
 async def get_history(user_id: int, limit: int = 20) -> list:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
             """SELECT role, content FROM (
                 SELECT role, content, created_at FROM conversations
-                WHERE user_id = $1
-                ORDER BY created_at DESC LIMIT $2
-            ) sub ORDER BY created_at ASC""",
-            user_id, limit
-        )
-    return list(rows)
+                WHERE user_id = ?
+                ORDER BY created_at DESC LIMIT ?
+            ) ORDER BY created_at ASC""",
+            (user_id, limit)
+        ) as cursor:
+            return await cursor.fetchall()
 
 
 async def clear_history(user_id: int):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM conversations WHERE user_id = $1", user_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
+        await db.commit()
 
 
 async def save_memory(user_id: int, key: str, value: str):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
             """INSERT INTO memories (user_id, key, value)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (user_id, key)
-               DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
-            user_id, key, value
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, key)
+               DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP""",
+            (user_id, key, value)
         )
+        await db.commit()
 
 
 async def delete_memory(user_id: int, key: str):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM memories WHERE user_id = $1 AND key = $2",
-            user_id, key
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM memories WHERE user_id = ? AND key = ?",
+            (user_id, key)
         )
+        await db.commit()
 
 
 async def get_memories(user_id: int) -> dict:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT key, value FROM memories WHERE user_id = $1 ORDER BY updated_at DESC",
-            user_id
-        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT key, value FROM memories WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
     return {row["key"]: row["value"] for row in rows}
 
 
 async def get_message_count(user_id: int) -> int:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.fetchval(
-            "SELECT COUNT(*) FROM conversations WHERE user_id = $1 AND role = 'user'",
-            user_id
-        )
-    return result or 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM conversations WHERE user_id = ? AND role = 'user'",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+    return row[0] if row else 0
