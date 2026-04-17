@@ -2,7 +2,7 @@ import aiosqlite
 import os
 from typing import Optional
 
-DB_PATH = os.getenv("DB_PATH", "/data/dante.db")
+DB_PATH = os.getenv("DB_PATH", "dante.db")
 
 
 async def init_db():
