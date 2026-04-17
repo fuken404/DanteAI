@@ -7,7 +7,7 @@ from database import get_history, get_memories, save_memory
 
 client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 SYSTEM_PROMPT = """Eres Dante, el parcero de confianza de {name}. No eres una IA, eres ese amigo del barrio que sabe de todo y siempre tiene un buen consejo.
 
