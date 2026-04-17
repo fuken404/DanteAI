@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from claude_client import get_response, extract_memories
 from voice_handler import transcribe_voice
+from web_handler import extract_urls, fetch_url_content
 from database import (
     save_message, clear_history,
     save_memory, delete_memory,
@@ -87,8 +88,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
+        urls = extract_urls(text)
+        enriched_text = text
+        if urls:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            contents = []
+            for url in urls[:2]:  # max 2 URLs por mensaje
+                content = await fetch_url_content(url)
+                contents.append(f"[Contenido de {url}]\n{content}")
+            enriched_text = text + "\n\n" + "\n\n".join(contents)
+
         await save_message(user.id, "user", text)
-        reply = await get_response(user.id, user.first_name, text)
+        reply = await get_response(user.id, user.first_name, enriched_text)
         await save_message(user.id, "assistant", reply)
         await update.message.reply_text(reply)
 
