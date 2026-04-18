@@ -8,7 +8,14 @@ _pool: Optional[asyncpg.Pool] = None
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"), min_size=1, max_size=5)
+        database_url = os.getenv("DATABASE_URL", "")
+        # asyncpg no soporta sslmode en el DSN — lo extraemos y pasamos ssl por separado
+        if "sslmode=" in database_url:
+            from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+            parsed = urlparse(database_url)
+            query = {k: v for k, v in parse_qs(parsed.query).items() if k != "sslmode"}
+            database_url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+        _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5, ssl="require")
     return _pool
 
 
