@@ -18,7 +18,7 @@ STRANGER = 222
 
 
 def telegram_update(user_id=OWNER, chat_type="private", text="hola", entities=()):
-    return Update.de_json({
+    update = Update.de_json({
         "update_id": 1,
         "message": {
             "message_id": 1, "date": 1700000000, "text": text,
@@ -27,6 +27,8 @@ def telegram_update(user_id=OWNER, chat_type="private", text="hola", entities=()
             "entities": list(entities),
         },
     }, None)
+    update.message.set_bot(SimpleNamespace(username="dante_bot"))  # los comandos revisan el nombre del bot
+    return update
 
 
 def handler_for(app, update):
