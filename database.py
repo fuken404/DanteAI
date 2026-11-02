@@ -1,22 +1,50 @@
-import asyncpg
 import os
 from typing import Optional
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+import asyncpg
 
 _pool: Optional[asyncpg.Pool] = None
+
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# Parámetros de las URLs de Neon que asyncpg enviaría al servidor como si fueran ajustes.
+CLIENT_ONLY_PARAMS = {"sslmode", "channel_binding"}
+
+
+def parse_database_url(url: str) -> tuple[str, str | bool]:
+    """Separa de la URL lo que asyncpg no entiende. Fuera de la máquina local, siempre con TLS."""
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    mode = params.get("sslmode", [""])[0]
+    query = {k: v for k, v in params.items() if k not in CLIENT_ONLY_PARAMS}
+    clean = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+    if mode == "disable" and parsed.hostname in LOCAL_HOSTS:
+        return clean, False
+    if not mode and parsed.hostname in LOCAL_HOSTS:
+        return clean, False
+    return clean, "require"
 
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        database_url = os.getenv("DATABASE_URL", "")
-        # asyncpg no soporta sslmode en el DSN — lo extraemos y pasamos ssl por separado
-        if "sslmode=" in database_url:
-            from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
-            parsed = urlparse(database_url)
-            query = {k: v for k, v in parse_qs(parsed.query).items() if k != "sslmode"}
-            database_url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
-        _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5, ssl="require")
+        url = os.getenv("DATABASE_URL", "")
+        if not url:
+            raise RuntimeError("DATABASE_URL no configurado")
+        dsn, ssl = parse_database_url(url)
+        _pool = await asyncpg.create_pool(
+            dsn, min_size=0, max_size=5, ssl=ssl, command_timeout=15,
+            statement_cache_size=0,  # compatible con el pooler de Neon
+            max_inactive_connection_lifetime=60,  # Neon cierra las conexiones al dormirse
+        )
     return _pool
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
 
 
 async def init_db():
@@ -47,13 +75,15 @@ async def init_db():
         """)
 
 
-async def save_message(user_id: int, role: str, content: str):
+async def save_exchange(user_id: int, user_text: str, reply: str):
+    """Guarda el mensaje y su respuesta juntos: nunca queda un mensaje sin responder en el historial."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)",
-            user_id, role, content
-        )
+        async with conn.transaction():
+            await conn.executemany(
+                "INSERT INTO conversations (user_id, role, content) VALUES ($1, $2, $3)",
+                [(user_id, "user", user_text), (user_id, "assistant", reply)],
+            )
 
 
 async def get_history(user_id: int, limit: int = 20) -> list:
@@ -61,10 +91,10 @@ async def get_history(user_id: int, limit: int = 20) -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT role, content FROM (
-                SELECT role, content, created_at FROM conversations
+                SELECT id, role, content FROM conversations
                 WHERE user_id = $1
-                ORDER BY created_at DESC LIMIT $2
-            ) sub ORDER BY created_at ASC""",
+                ORDER BY id DESC LIMIT $2
+            ) sub ORDER BY id ASC""",
             user_id, limit
         )
     return list(rows)
@@ -74,6 +104,12 @@ async def clear_history(user_id: int):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM conversations WHERE user_id = $1", user_id)
+
+
+async def clear_memories(user_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM memories WHERE user_id = $1", user_id)
 
 
 async def save_memory(user_id: int, key: str, value: str):
@@ -88,13 +124,14 @@ async def save_memory(user_id: int, key: str, value: str):
         )
 
 
-async def delete_memory(user_id: int, key: str):
+async def delete_memory(user_id: int, key: str) -> bool:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        result = await conn.execute(
             "DELETE FROM memories WHERE user_id = $1 AND key = $2",
             user_id, key
         )
+    return result.endswith(" 1")
 
 
 async def get_memories(user_id: int) -> dict:
