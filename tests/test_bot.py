@@ -41,8 +41,8 @@ def handler_for(app, update):
 
 # ── Acceso ───────────────────────────────────────────────
 
-def bot(ids):
-    return main.build_app("123:token", ids)
+def bot(ids, public=False):
+    return main.build_app("123:token", ids, public)
 
 
 def test_el_dueno_llega_a_claude():
@@ -172,7 +172,10 @@ def fake_update(text="hola"):
     )
 
 
-CONTEXT = SimpleNamespace(bot=SimpleNamespace(send_chat_action=lambda **_: asyncio.sleep(0)))
+CONTEXT = SimpleNamespace(
+    bot=SimpleNamespace(send_chat_action=lambda **_: asyncio.sleep(0)),
+    bot_data={"owners": {OWNER}},
+)
 
 
 @pytest.fixture
@@ -193,8 +196,9 @@ def saved(monkeypatch):
 def respond_with(monkeypatch, result):
     calls = []
 
-    async def get_response(user_id, name, prompt, image_data=None):
+    async def get_response(user_id, name, prompt, image_data=None, profile=None):
         calls.append(prompt)
+        respond_with.profile = profile
         if isinstance(result, Exception):
             raise result
         return result
@@ -224,7 +228,7 @@ async def test_una_negativa_se_dice_y_no_se_guarda(monkeypatch, saved):
     update = fake_update()
     await handlers.handle_text(update, CONTEXT)
     assert saved == []
-    assert "no te puedo ayudar" in update.message.sent[0][0]
+    assert "No puedo ayudarte" in update.message.sent[0][0]
 
 
 async def test_contenido_web_va_al_prompt_y_no_al_historial(monkeypatch, saved):
@@ -330,6 +334,113 @@ async def test_denegado_muestra_el_id():
     update = fake_update()
     await handlers.reply_denied(update, CONTEXT)
     assert str(OWNER) in update.message.sent[0][0]
+
+
+# ── Demo pública ─────────────────────────────────────────
+
+def test_modo_publico_deja_entrar_a_visitantes_en_privado():
+    assert handler_for(bot({OWNER}, public=True), telegram_update(STRANGER)) is handlers.handle_text
+    assert handler_for(bot({OWNER}, public=True), telegram_update(STRANGER, chat_type="group")) is None
+
+
+def test_la_demo_esta_apagada_salvo_que_se_pida(monkeypatch):
+    monkeypatch.delenv("PUBLIC_DEMO", raising=False)
+    assert config.public_demo_enabled() is False
+    monkeypatch.setenv("PUBLIC_DEMO", "true")
+    assert config.public_demo_enabled() is True
+
+
+def visitor_update(text="hola"):
+    update = fake_update(text)
+    update.effective_user = SimpleNamespace(id=STRANGER, first_name="Ana")
+    return update
+
+
+@pytest.fixture
+def quota(monkeypatch):
+    state = {"result": "ok", "calls": 0}
+
+    async def consume_quota(user_id, day, user_limit, total_limit):
+        state["calls"] += 1
+        return state["result"]
+
+    monkeypatch.setattr(handlers, "consume_quota", consume_quota)
+    return state
+
+
+async def test_visitante_usa_perfil_limitado(monkeypatch, saved, quota):
+    respond_with(monkeypatch, "Listo")
+    await handlers.handle_text(visitor_update(), CONTEXT)
+    profile = respond_with.profile
+    assert profile.public and profile.model == config.PUBLIC_MODEL
+    assert profile.max_tokens <= 800 and not profile.auto_memory
+    assert quota["calls"] == 1
+
+
+async def test_el_dueno_no_gasta_cupo(monkeypatch, saved, quota):
+    respond_with(monkeypatch, "Listo")
+    await handlers.handle_text(fake_update(), CONTEXT)
+    assert quota["calls"] == 0 and not respond_with.profile.public
+
+
+@pytest.mark.parametrize("result,expected", [("user", "Llegaste al límite"), ("total", "llegó a su límite")])
+async def test_sin_cupo_no_llama_a_claude(monkeypatch, saved, quota, result, expected):
+    calls = respond_with(monkeypatch, "Listo")
+    quota["result"] = result
+    update = visitor_update()
+    await handlers.handle_text(update, CONTEXT)
+    assert calls == [] and saved == []
+    assert expected in update.message.sent[0][0]
+
+
+async def test_mensaje_largo_no_gasta_cupo(monkeypatch, saved, quota):
+    calls = respond_with(monkeypatch, "Listo")
+    update = visitor_update("x" * (handlers.VISITOR_MAX_TEXT + 1))
+    await handlers.handle_text(update, CONTEXT)
+    assert calls == [] and quota["calls"] == 0
+
+
+async def test_nota_de_voz_larga_no_se_transcribe(monkeypatch, quota):
+    update = visitor_update()
+    update.message.voice = SimpleNamespace(duration=handlers.VISITOR_MAX_VOICE_SECONDS + 1)
+    await handlers.handle_voice(update, CONTEXT)
+    assert quota["calls"] == 0 and "segundos" in update.message.sent[0][0]
+
+
+async def test_imagen_grande_no_se_descarga(quota):
+    update = visitor_update()
+    update.message.photo = [SimpleNamespace(file_size=handlers.VISITOR_MAX_PHOTO_BYTES + 1)]
+    await handlers.handle_photo(update, CONTEXT)
+    assert quota["calls"] == 0
+
+
+async def test_visitante_recibe_el_aviso_y_el_dueno_no():
+    visitor, owner = visitor_update(), fake_update()
+    await handlers.start_command(visitor, CONTEXT)
+    await handlers.start_command(owner, CONTEXT)
+    assert "demo pública" in visitor.message.sent[0][0] and "123" in visitor.message.sent[0][0]
+    assert "demo pública" not in owner.message.sent[0][0]
+
+
+async def test_visitante_no_acumula_recuerdos_sin_limite(monkeypatch):
+    stored = []
+
+    async def save_memory(user_id, key, value):
+        stored.append((key, value))
+
+    async def full(user_id):
+        return handlers.VISITOR_MAX_MEMORIES
+
+    async def empty(user_id):
+        return 0
+
+    monkeypatch.setattr(handlers, "save_memory", save_memory)
+    monkeypatch.setattr(handlers, "count_memories", full)
+    await handlers.remember_command(visitor_update("/remember a: b"), CONTEXT)
+    assert stored == []
+    monkeypatch.setattr(handlers, "count_memories", empty)
+    await handlers.remember_command(visitor_update("/remember a: " + "b" * 999), CONTEXT)
+    assert len(stored[0][1]) == handlers.MAX_VALUE_LENGTH
 
 
 def test_partir_sin_espacios():

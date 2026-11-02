@@ -9,6 +9,7 @@ load_dotenv()
 
 CHAT_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
 MEMORY_MODEL = os.getenv("MEMORY_MODEL", "claude-haiku-5-5")
+PUBLIC_MODEL = os.getenv("PUBLIC_MODEL", "claude-haiku-5-5")
 SECRET_VARIABLES = ("TELEGRAM_TOKEN", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "DATABASE_URL", "WEBHOOK_SECRET")
 
 
@@ -23,6 +24,19 @@ def allowed_user_ids(raw: str | None = None) -> set[int]:
         elif part:
             logging.getLogger(__name__).warning("ALLOWED_USER_IDS tiene un valor inválido; se ignora")
     return ids
+
+
+def public_demo_enabled() -> bool:
+    """Apagada salvo que se pida: abrir el bot gasta crédito."""
+    return os.getenv("PUBLIC_DEMO", "").strip().lower() in ("1", "true", "si", "sí", "yes")
+
+
+def daily_limit_per_user() -> int:
+    return int(os.getenv("PUBLIC_DAILY_LIMIT_PER_USER", "10"))
+
+
+def daily_limit_total() -> int:
+    return int(os.getenv("PUBLIC_DAILY_LIMIT_TOTAL", "100"))
 
 
 def webhook_base_url() -> str | None:

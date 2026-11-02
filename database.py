@@ -1,10 +1,13 @@
 import os
+from datetime import date
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import asyncpg
 
 _pool: Optional[asyncpg.Pool] = None
+
+TOTAL_USAGE_ID = 0  # fila con el total del día; ningún usuario de Telegram tiene ese ID
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # Parámetros de las URLs de Neon que asyncpg enviaría al servidor como si fueran ajustes.
@@ -73,6 +76,65 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_conv_user_time
             ON conversations(user_id, created_at DESC)
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_usage (
+                day DATE NOT NULL,
+                user_id BIGINT NOT NULL,
+                count INTEGER NOT NULL,
+                PRIMARY KEY (day, user_id)
+            )
+        """)
+
+
+class _QuotaExceeded(Exception):
+    """Interno: deshace la transacción para no gastar el cupo global."""
+
+
+async def consume_quota(user_id: int, day: date, user_limit: int, total_limit: int) -> str:
+    """Descuenta un mensaje de forma atómica. Devuelve 'ok', 'user' o 'total'."""
+    query = """INSERT INTO daily_usage (day, user_id, count) VALUES ($1, $2, 1)
+               ON CONFLICT (day, user_id) DO UPDATE SET count = daily_usage.count + 1
+               WHERE daily_usage.count < $3
+               RETURNING count"""
+    if user_limit <= 0 or total_limit <= 0:
+        return "total"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            async with conn.transaction():
+                if await conn.fetchval(query, day, TOTAL_USAGE_ID, total_limit) is None:
+                    raise _QuotaExceeded("total")
+                if await conn.fetchval(query, day, user_id, user_limit) is None:
+                    raise _QuotaExceeded("user")
+        except _QuotaExceeded as exceeded:
+            return exceeded.args[0]
+    return "ok"
+
+
+async def purge_visitor_data(owner_ids: set[int], days: int) -> None:
+    """Borra lo que dejaron los visitantes. Los datos de los dueños no vencen."""
+    owners = list(owner_ids)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """DELETE FROM conversations
+               WHERE created_at < NOW() - make_interval(days => $1) AND NOT (user_id = ANY($2::bigint[]))""",
+            days, owners,
+        )
+        await conn.execute(
+            """DELETE FROM memories
+               WHERE updated_at < NOW() - make_interval(days => $1) AND NOT (user_id = ANY($2::bigint[]))""",
+            days, owners,
+        )
+        await conn.execute(
+            "DELETE FROM daily_usage WHERE day < (NOW() - make_interval(days => $1))::date", days,
+        )
+
+
+async def count_memories(user_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM memories WHERE user_id = $1", user_id) or 0
 
 
 async def save_exchange(user_id: int, user_text: str, reply: str):

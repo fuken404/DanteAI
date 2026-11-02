@@ -10,9 +10,9 @@ from aiohttp import web
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-from database import close_pool, init_db
+from database import close_pool, init_db, purge_visitor_data
 from handlers import (
-    clear_command, forget_command, handle_error, handle_photo,
+    VISITOR_RETENTION_DAYS, clear_command, forget_command, handle_error, handle_photo,
     handle_text, handle_voice, help_command,
     memories_command, remember_command, reply_denied, start_command,
 )
@@ -20,6 +20,8 @@ from handlers import (
 logger = logging.getLogger(__name__)
 
 ALLOWED_UPDATES = ["message"]
+PURGE_EVERY_SECONDS = 6 * 60 * 60
+CONCURRENT_UPDATES = 8  # un visitante lento no debe frenar a los demás
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 PTB_APP = web.AppKey("ptb_app", Application)
 WEBHOOK_SECRET = web.AppKey("webhook_secret", str)
@@ -52,23 +54,37 @@ def create_web_app(ptb_app: Application, secret: str) -> web.Application:
     return web_app
 
 
-def build_app(token: str, allowed_ids: set[int]) -> Application:
-    app = Application.builder().token(token).build()
+def build_app(token: str, allowed_ids: set[int], public: bool = False) -> Application:
+    app = Application.builder().token(token).concurrent_updates(CONCURRENT_UPDATES).build()
+    app.bot_data["owners"] = allowed_ids
     # Con allow_empty=False, una lista vacía no deja pasar a nadie.
     owner = filters.User(user_id=allowed_ids, allow_empty=False) & filters.ChatType.PRIVATE
+    # En modo público, los visitantes pasan y cada mensaje descuenta de su cupo.
+    admitted = filters.ChatType.PRIVATE if public else owner
 
-    app.add_handler(CommandHandler("start", start_command, filters=owner))
-    app.add_handler(CommandHandler("help", help_command, filters=owner))
-    app.add_handler(CommandHandler("clear", clear_command, filters=owner))
-    app.add_handler(CommandHandler("memories", memories_command, filters=owner))
-    app.add_handler(CommandHandler("remember", remember_command, filters=owner))
-    app.add_handler(CommandHandler("forget", forget_command, filters=owner))
-    app.add_handler(MessageHandler(owner & filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(owner & filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(owner & filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~owner, reply_denied))
+    app.add_handler(CommandHandler("start", start_command, filters=admitted))
+    app.add_handler(CommandHandler("help", help_command, filters=admitted))
+    app.add_handler(CommandHandler("clear", clear_command, filters=admitted))
+    app.add_handler(CommandHandler("memories", memories_command, filters=admitted))
+    app.add_handler(CommandHandler("remember", remember_command, filters=admitted))
+    app.add_handler(CommandHandler("forget", forget_command, filters=admitted))
+    app.add_handler(MessageHandler(admitted & filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(admitted & filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(admitted & filters.PHOTO, handle_photo))
+    if not public:
+        app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~owner, reply_denied))
     app.add_error_handler(handle_error)
     return app
+
+
+async def purge_periodically(owner_ids: set[int]) -> None:
+    """También corre al arrancar: en un plan gratuito el servidor se duerme entre mensajes."""
+    while True:
+        try:
+            await purge_visitor_data(owner_ids, VISITOR_RETENTION_DAYS)
+        except Exception as error:
+            logger.warning("No se pudieron borrar datos vencidos: %s", type(error).__name__)
+        await asyncio.sleep(PURGE_EVERY_SECONDS)
 
 
 async def wait_for_stop_signal() -> None:
@@ -116,12 +132,15 @@ async def main():
         raise RuntimeError("WEBHOOK_SECRET es obligatorio en modo webhook")
 
     allowed_ids = config.allowed_user_ids()
-    if not allowed_ids:
+    public = config.public_demo_enabled()
+    if not allowed_ids and not public:
         logger.warning("ALLOWED_USER_IDS está vacío: nadie podrá usar el bot")
+    logger.info("Demo pública: %s", "activa" if public else "apagada")
 
     await init_db()
+    purge_task = asyncio.create_task(purge_periodically(allowed_ids))
 
-    ptb_app = build_app(token, allowed_ids)
+    ptb_app = build_app(token, allowed_ids, public)
     await ptb_app.initialize()
     await ptb_app.bot.set_my_commands([
         BotCommand("start", "Bienvenida"),
@@ -141,6 +160,7 @@ async def main():
         else:
             await run_polling(ptb_app)
     finally:
+        purge_task.cancel()
         await ptb_app.stop()
         await ptb_app.shutdown()
         await close_pool()

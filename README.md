@@ -1,8 +1,8 @@
 # DanteAI
 
-Asistente personal en Telegram con personalidad de parcero colombiano y memoria persistente. Conversa por texto, notas de voz e imágenes, y lee los enlaces que le envían.
+Asistente en Telegram con memoria persistente. Conversa por texto, notas de voz e imágenes, y lee los enlaces que le envían.
 
-Es un bot privado: solo responde a los usuarios autorizados, para que nadie más gaste los créditos de las APIs.
+Tiene dos niveles: acceso completo para los usuarios autorizados y una demo pública opcional, con cupos para proteger el crédito de las APIs.
 
 ## Qué hace
 
@@ -11,11 +11,26 @@ Es un bot privado: solo responde a los usuarios autorizados, para que nadie más
 - **Memoria:** guarda la conversación en PostgreSQL y extrae datos duraderos con salidas estructuradas. Se revisan con `/memories` y se borran con `/forget` o `/clear todo`.
 - **Enlaces:** lee hasta dos por mensaje y trata su contenido como información, no como instrucciones.
 
+## Demo pública
+
+Se activa con `PUBLIC_DEMO=true` y se apaga quitándola.
+
+| | Usuarios autorizados | Visitantes |
+|---|---|---|
+| Mensajes | Sin cupo | 10 al día por persona y 100 al día en total (configurable) |
+| Modelo | `claude-opus-5-5` | `claude-haiku-5-5`, máximo 800 tokens por respuesta |
+| Contexto | Últimos 20 mensajes | Últimos 6 mensajes |
+| Entrada | Sin topes propios | 1.500 caracteres, voz de 60 s, imagen de 5 MB |
+| Memoria | Automática y manual | Solo con `/remember`, máximo 20 datos |
+| Retención | Sin vencimiento | 7 días; `/clear todo` borra antes |
+
+Los visitantes reciben un aviso de privacidad en `/start`. No es un servicio de emergencias, y el bot lo indica si detecta una.
+
 ## Seguridad
 
 | Riesgo | Defensa |
 |---|---|
-| Que otros gasten los créditos | Lista `ALLOWED_USER_IDS`; si está vacía no entra nadie, y un extraño no genera llamadas de pago |
+| Que otros gasten los créditos | Sin `PUBLIC_DEMO=true` solo entran los de `ALLOWED_USER_IDS`. Con la demo activa, cada visitante tiene un cupo diario y hay un tope total, descontados de forma atómica antes de llamar a una API de pago |
 | Mensajes falsos al webhook | Exige el secreto de Telegram, y sin `WEBHOOK_SECRET` el bot no arranca en ese modo |
 | Abrir la red interna con un enlace | Solo direcciones públicas, revisando cada redirección y limitando la descarga a 2 MB |
 | Filtrar el token en los logs | La URL de Telegram lo lleva dentro: las librerías HTTP no registran URLs y los secretos se reemplazan en cada línea |
@@ -33,7 +48,7 @@ cp .env.example .env   # completa los valores
 python main.py
 ```
 
-Sin `WEBHOOK_URL` ni `RENDER_EXTERNAL_HOSTNAME` usa polling. Para saber tu ID, escríbele al bot: te lo dirá en la respuesta de acceso denegado.
+Sin `WEBHOOK_URL` ni `RENDER_EXTERNAL_HOSTNAME` usa polling. Para saber tu ID, escríbele al bot con la demo apagada: te lo dirá en la respuesta de acceso denegado.
 
 ## Desplegar
 
